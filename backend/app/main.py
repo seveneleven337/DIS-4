@@ -1,4 +1,3 @@
-
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -9,15 +8,20 @@ from app.adapters.mongodb.database import (
     check_mongodb_connection,
     close_mongodb_connection,
 )
+from app.adapters.mongodb.schema import create_mongodb_schema
 from app.adapters.postgresql.database import (
     check_postgresql_connection,
     close_postgresql_connection,
 )
+from app.adapters.postgresql.schema import create_database_schema
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        await create_database_schema()
+        await create_mongodb_schema()
+
         yield
     finally:
         try:

@@ -1,4 +1,3 @@
-
 from datetime import date, time
 from decimal import Decimal
 
@@ -47,8 +46,12 @@ def _restore_value(value):
 
 def to_mongodb_document(
     record: SeedRecord | RecordResponse,
+    version: int | None = None,
 ) -> dict:
     """Convert a logical record into a MongoDB document."""
+    if version is None:
+        version = getattr(record, "version", 1)
+
     order = record.order.model_dump(
         mode="python",
         exclude={
@@ -70,6 +73,7 @@ def to_mongodb_document(
 
     document = {
         "_id": record.order.order_id,
+        "_version": version,
         "customer": record.customer.model_dump(mode="python"),
         "store": record.store.model_dump(mode="python"),
         "sales_representative": (
@@ -119,6 +123,7 @@ def from_mongodb_document(
         for key, value in document.items()
         if key not in {
             "_id",
+            "_version",
             "customer",
             "store",
             "sales_representative",

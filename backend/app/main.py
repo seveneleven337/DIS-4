@@ -9,7 +9,10 @@ from app.adapters.mongodb.database import (
     close_mongodb_connection,
 )
 from app.adapters.mongodb.schema import create_mongodb_schema
-from app.adapters.mongodb.seeds import seed_mongodb_records
+from app.adapters.mongodb.seeds import (
+    seed_mongodb_records,
+    synchronize_mongodb_versions,
+)
 from app.adapters.postgresql.database import (
     check_postgresql_connection,
     close_postgresql_connection,
@@ -29,6 +32,9 @@ async def lifespan(app: FastAPI):
         # Insert initial data without overwriting existing records.
         await seed_postgresql()
         await seed_mongodb_records()
+
+        # Synchronize MongoDB versions with PostgreSQL metadata.
+        await synchronize_mongodb_versions()
 
         yield
     finally:

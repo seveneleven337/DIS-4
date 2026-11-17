@@ -569,6 +569,35 @@ class PostgreSQLRepository:
 
         return True
 
+    async def create_storage_location(
+        self,
+        order_id: str,
+        storage_location: str,
+        version: int = 1,
+    ) -> None:
+        if storage_location != "MONGODB":
+            raise ValueError(
+                "Metadata-only creation is reserved for MONGODB records."
+            )
+
+        if version < 1:
+            raise ValueError("Version must be greater than or equal to 1.")
+
+        existing = await self.get_storage_location(order_id)
+
+        if existing is not None:
+            raise ValueError(
+                f"Metadata for order '{order_id}' already exists."
+            )
+
+        await self.session.execute(
+            pg_insert(RecordLocationDB).values(
+                order_id=order_id,
+                storage_location=storage_location,
+                version=version,
+            )
+        )
+
     async def get_storage_location(
         self,
         order_id: str,

@@ -171,6 +171,13 @@ class MongoDBRepository:
 
         return document
 
+    async def delete_created(self, order_id: str) -> bool:
+        result = await self.collection.delete_one(
+            {"_id": order_id}
+        )
+
+        return result.deleted_count == 1
+
     async def update(
         self,
         record: RecordResponse,

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories.mongodb import MongoDBRepository
 from app.repositories.postgresql import PostgreSQLRepository
 from app.schemas.filters import RecordFilters
-from app.schemas.record import RecordResponse
+from app.schemas.record import RecordCreate, RecordResponse
 
 
 RecordSource = Literal["ALL", "POSTGRESQL", "MONGODB"]
@@ -15,6 +15,70 @@ class DistributedRecordService:
     def __init__(self, session: AsyncSession, mongodb_database):
         self.postgresql_repository = PostgreSQLRepository(session)
         self.mongodb_repository = MongoDBRepository(mongodb_database)
+
+    async def create(self, record: RecordCreate) -> RecordResponse:
+        response = RecordResponse.model_validate({
+            **record.model_dump(),
+            "version": 1,
+        })
+
+        order_id = response.order.order_id
+        storage_location = response.storage_location
+        mongo_created = False
+
+        try:
+            if storage_location == "POSTGRESQL":
+                async with self.postgresql_repository.session.begin():
+                    await self.postgresql_repository.create(response)
+
+            elif storage_location == "MONGODB":
+                await self.mongodb_repository.create(response)
+                mongo_created = True
+
+                async with self.postgresql_repository.session.begin():
+                    await self.postgresql_repository.create_storage_location(
+                        order_id=order_id,
+                        storage_location="MONGODB",
+                        version=1,
+                    )
+
+            elif storage_location == "BOTH":
+                async with self.postgresql_repository.session.begin():
+                    await self.postgresql_repository.create(response)
+
+                    await self.mongodb_repository.create(response)
+                    mongo_created = True
+
+            else:
+                raise ValueError(
+                    f"Unsupported storage location: {storage_location}"
+                )
+
+        except Exception as exc:
+            if mongo_created:
+                try:
+                    compensated = (
+                        await self.mongodb_repository.delete_created(
+                            order_id
+                        )
+                    )
+                except Exception as compensation_error:
+                    raise RuntimeError(
+                        f"Creation of {order_id} failed and MongoDB "
+                        "compensation also failed. Manual reconciliation "
+                        "is required."
+                    ) from compensation_error
+
+                if not compensated:
+                    raise RuntimeError(
+                        f"Creation of {order_id} failed and its MongoDB "
+                        "document could not be compensated. "
+                        "Manual reconciliation is required."
+                    ) from exc
+
+            raise
+
+        return response
 
     async def get_by_order_id(
         self,

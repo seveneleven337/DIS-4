@@ -2,8 +2,13 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from pymongo.errors import PyMongoError
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.adapters.mongodb.database import (
+    check_mongodb_connection,
+    close_mongodb_connection,
+)
 from app.adapters.postgresql.database import (
     check_postgresql_connection,
     close_postgresql_connection,
@@ -12,8 +17,13 @@ from app.adapters.postgresql.database import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    await close_postgresql_connection()
+    try:
+        yield
+    finally:
+        try:
+            await close_mongodb_connection()
+        finally:
+            await close_postgresql_connection()
 
 
 app = FastAPI(
@@ -45,4 +55,20 @@ async def postgresql_health_check():
     return {
         "status": "healthy",
         "database": "postgresql",
+    }
+
+
+@app.get("/health/mongodb", tags=["Health"])
+async def mongodb_health_check():
+    try:
+        await check_mongodb_connection()
+    except PyMongoError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="MongoDB is unavailable",
+        ) from exc
+
+    return {
+        "status": "healthy",
+        "database": "mongodb",
     }

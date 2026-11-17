@@ -206,75 +206,74 @@ class PostgreSQLRepository:
                 "Order ID and transaction Order ID must match."
             )
 
-        async with self.session.begin():
-            existing = await self.session.scalar(
-                select(OrderDB.order_id).where(
-                    OrderDB.order_id == record.order.order_id
-                )
+        existing = await self.session.scalar(
+            select(OrderDB.order_id).where(
+                OrderDB.order_id == record.order.order_id
+            )
+        )
+
+        if existing is not None:
+            raise ValueError(
+                f"Order '{record.order.order_id}' already exists."
             )
 
-            if existing is not None:
-                raise ValueError(
-                    f"Order '{record.order.order_id}' already exists."
-                )
+        await self._insert_entity_if_missing(
+            CustomerDB,
+            record.customer.model_dump(),
+            "customer_id",
+        )
 
+        await self._insert_entity_if_missing(
+            StoreDB,
+            record.store.model_dump(),
+            "store_id",
+        )
+
+        await self._insert_entity_if_missing(
+            SalesRepresentativeDB,
+            record.sales_representative.model_dump(),
+            "sales_representative_id",
+        )
+
+        await self._insert_entity_if_missing(
+            ProductDB,
+            record.product.model_dump(),
+            "product_id",
+        )
+
+        if record.promotion is not None:
             await self._insert_entity_if_missing(
-                CustomerDB,
-                record.customer.model_dump(),
-                "customer_id",
+                PromotionDB,
+                record.promotion.model_dump(),
+                "promotion_code",
             )
 
-            await self._insert_entity_if_missing(
-                StoreDB,
-                record.store.model_dump(),
-                "store_id",
+        await self.session.execute(
+            pg_insert(OrderDB).values(
+                **record.order.model_dump()
             )
+        )
 
-            await self._insert_entity_if_missing(
-                SalesRepresentativeDB,
-                record.sales_representative.model_dump(),
-                "sales_representative_id",
+        await self.session.execute(
+            pg_insert(TransactionDB).values(
+                **record.transaction.model_dump()
             )
+        )
 
-            await self._insert_entity_if_missing(
-                ProductDB,
-                record.product.model_dump(),
-                "product_id",
-            )
-
-            if record.promotion is not None:
-                await self._insert_entity_if_missing(
-                    PromotionDB,
-                    record.promotion.model_dump(),
-                    "promotion_code",
-                )
-
+        if record.return_record is not None:
             await self.session.execute(
-                pg_insert(OrderDB).values(
-                    **record.order.model_dump()
+                pg_insert(ReturnDB).values(
+                    **record.return_record.model_dump()
                 )
             )
 
-            await self.session.execute(
-                pg_insert(TransactionDB).values(
-                    **record.transaction.model_dump()
-                )
+        await self.session.execute(
+            pg_insert(RecordLocationDB).values(
+                order_id=record.order.order_id,
+                storage_location=record.storage_location,
+                version=record.version,
             )
-
-            if record.return_record is not None:
-                await self.session.execute(
-                    pg_insert(ReturnDB).values(
-                        **record.return_record.model_dump()
-                    )
-                )
-
-            await self.session.execute(
-                pg_insert(RecordLocationDB).values(
-                    order_id=record.order.order_id,
-                    storage_location=record.storage_location,
-                    version=record.version,
-                )
-            )
+        )
 
         return record
 
@@ -317,131 +316,130 @@ class PostgreSQLRepository:
                     "Return Order ID must match the Order ID."
                 )
 
-        async with self.session.begin():
-            existing = await self.get_by_order_id(
-                record.order.order_id
+        existing = await self.get_by_order_id(
+            record.order.order_id
+        )
+
+        if existing is None:
+            raise ValueError(
+                f"Order '{record.order.order_id}' does not exist."
             )
 
-            if existing is None:
-                raise ValueError(
-                    f"Order '{record.order.order_id}' does not exist."
-                )
-
-            if existing.storage_location != record.storage_location:
-                raise ValueError(
-                    "Storage location cannot be changed by this repository."
-                )
-
-            if existing.order.customer_id != record.order.customer_id:
-                raise ValueError("Customer ID cannot be changed.")
-
-            if existing.order.store_id != record.order.store_id:
-                raise ValueError("Store ID cannot be changed.")
-
-            if (
-                existing.order.sales_representative_id
-                != record.order.sales_representative_id
-            ):
-                raise ValueError(
-                    "Sales representative ID cannot be changed."
-                )
-
-            if existing.order.promotion_code != record.order.promotion_code:
-                raise ValueError("Promotion code cannot be changed.")
-
-            if (
-                existing.transaction.transaction_id
-                != record.transaction.transaction_id
-            ):
-                raise ValueError("Transaction ID cannot be changed.")
-
-            if existing.transaction.product_id != record.transaction.product_id:
-                raise ValueError("Product ID cannot be changed.")
-
-            if record.version != existing.version:
-                raise ValueError(
-                    "Version conflict: the record has been modified."
-                )
-
-            await self._update_entity(
-                CustomerDB,
-                record.customer.model_dump(),
-                "customer_id",
+        if existing.storage_location != record.storage_location:
+            raise ValueError(
+                "Storage location cannot be changed by this repository."
             )
 
-            await self._update_entity(
-                StoreDB,
-                record.store.model_dump(),
-                "store_id",
+        if existing.order.customer_id != record.order.customer_id:
+            raise ValueError("Customer ID cannot be changed.")
+
+        if existing.order.store_id != record.order.store_id:
+            raise ValueError("Store ID cannot be changed.")
+
+        if (
+            existing.order.sales_representative_id
+            != record.order.sales_representative_id
+        ):
+            raise ValueError(
+                "Sales representative ID cannot be changed."
             )
 
-            await self._update_entity(
-                SalesRepresentativeDB,
-                record.sales_representative.model_dump(),
-                "sales_representative_id",
+        if existing.order.promotion_code != record.order.promotion_code:
+            raise ValueError("Promotion code cannot be changed.")
+
+        if (
+            existing.transaction.transaction_id
+            != record.transaction.transaction_id
+        ):
+            raise ValueError("Transaction ID cannot be changed.")
+
+        if existing.transaction.product_id != record.transaction.product_id:
+            raise ValueError("Product ID cannot be changed.")
+
+        if record.version != existing.version:
+            raise ValueError(
+                "Version conflict: the record has been modified."
             )
 
+        await self._update_entity(
+            CustomerDB,
+            record.customer.model_dump(),
+            "customer_id",
+        )
+
+        await self._update_entity(
+            StoreDB,
+            record.store.model_dump(),
+            "store_id",
+        )
+
+        await self._update_entity(
+            SalesRepresentativeDB,
+            record.sales_representative.model_dump(),
+            "sales_representative_id",
+        )
+
+        await self._update_entity(
+            ProductDB,
+            record.product.model_dump(),
+            "product_id",
+        )
+
+        if record.promotion is not None:
             await self._update_entity(
-                ProductDB,
-                record.product.model_dump(),
-                "product_id",
+                PromotionDB,
+                record.promotion.model_dump(),
+                "promotion_code",
             )
 
-            if record.promotion is not None:
-                await self._update_entity(
-                    PromotionDB,
-                    record.promotion.model_dump(),
-                    "promotion_code",
+        await self._update_entity(
+            OrderDB,
+            record.order.model_dump(),
+            "order_id",
+        )
+
+        await self._update_entity(
+            TransactionDB,
+            record.transaction.model_dump(),
+            "transaction_id",
+        )
+
+        if record.return_record is None:
+            await self.session.execute(
+                delete(ReturnDB).where(
+                    ReturnDB.order_id == record.order.order_id
                 )
-
+            )
+        elif existing.return_record is None:
+            await self.session.execute(
+                pg_insert(ReturnDB).values(
+                    **record.return_record.model_dump()
+                )
+            )
+        else:
             await self._update_entity(
-                OrderDB,
-                record.order.model_dump(),
+                ReturnDB,
+                record.return_record.model_dump(),
                 "order_id",
             )
 
-            await self._update_entity(
-                TransactionDB,
-                record.transaction.model_dump(),
-                "transaction_id",
+        version_statement = (
+            update(RecordLocationDB)
+            .where(
+                RecordLocationDB.order_id == record.order.order_id,
+                RecordLocationDB.version == record.version,
             )
+            .values(version=RecordLocationDB.version + 1)
+        )
 
-            if record.return_record is None:
-                await self.session.execute(
-                    delete(ReturnDB).where(
-                        ReturnDB.order_id == record.order.order_id
-                    )
-                )
-            elif existing.return_record is None:
-                await self.session.execute(
-                    pg_insert(ReturnDB).values(
-                        **record.return_record.model_dump()
-                    )
-                )
-            else:
-                await self._update_entity(
-                    ReturnDB,
-                    record.return_record.model_dump(),
-                    "order_id",
-                )
+        version_result = await self.session.execute(
+            version_statement
+        )
 
-            version_statement = (
-                update(RecordLocationDB)
-                .where(
-                    RecordLocationDB.order_id == record.order.order_id,
-                    RecordLocationDB.version == record.version,
-                )
-                .values(version=RecordLocationDB.version + 1)
+        if version_result.rowcount != 1:
+            raise ValueError(
+                "Version conflict: the record has been modified."
             )
-
-            version_result = await self.session.execute(
-                version_statement
-            )
-
-            if version_result.rowcount != 1:
-                raise ValueError(
-                    "Version conflict: the record has been modified."
-                )
 
         return record.model_copy(
             update={"version": record.version + 1}
@@ -452,55 +450,54 @@ class PostgreSQLRepository:
         order_id: str,
         expected_version: int,
     ) -> bool:
-        async with self.session.begin():
-            location = await self.session.scalar(
-                select(RecordLocationDB).where(
-                    RecordLocationDB.order_id == order_id
-                )
+        location = await self.session.scalar(
+            select(RecordLocationDB).where(
+                RecordLocationDB.order_id == order_id
+            )
+        )
+
+        if location is None:
+            raise ValueError(
+                f"Order '{order_id}' does not exist in PostgreSQL."
             )
 
-            if location is None:
-                raise ValueError(
-                    f"Order '{order_id}' does not exist in PostgreSQL."
-                )
-
-            if location.storage_location not in ("POSTGRESQL", "BOTH"):
-                raise ValueError(
-                    "This record is not stored in PostgreSQL."
-                )
-
-            if location.version != expected_version:
-                raise ValueError(
-                    "Version conflict: the record has been modified."
-                )
-
-            await self.session.execute(
-                delete(TransactionDB).where(
-                    TransactionDB.order_id == order_id
-                )
+        if location.storage_location not in ("POSTGRESQL", "BOTH"):
+            raise ValueError(
+                "This record is not stored in PostgreSQL."
             )
 
-            await self.session.execute(
-                delete(ReturnDB).where(
-                    ReturnDB.order_id == order_id
-                )
+        if location.version != expected_version:
+            raise ValueError(
+                "Version conflict: the record has been modified."
             )
 
-            order_result = await self.session.execute(
-                delete(OrderDB).where(
-                    OrderDB.order_id == order_id
-                )
+        await self.session.execute(
+            delete(TransactionDB).where(
+                TransactionDB.order_id == order_id
+            )
+        )
+
+        await self.session.execute(
+            delete(ReturnDB).where(
+                ReturnDB.order_id == order_id
+            )
+        )
+
+        order_result = await self.session.execute(
+            delete(OrderDB).where(
+                OrderDB.order_id == order_id
+            )
+        )
+
+        if order_result.rowcount != 1:
+            raise ValueError(
+                f"Order '{order_id}' could not be deleted."
             )
 
-            if order_result.rowcount != 1:
-                raise ValueError(
-                    f"Order '{order_id}' could not be deleted."
-                )
-
-            await self.session.execute(
-                delete(RecordLocationDB).where(
-                    RecordLocationDB.order_id == order_id
-                )
+        await self.session.execute(
+            delete(RecordLocationDB).where(
+                RecordLocationDB.order_id == order_id
             )
+        )
 
         return True

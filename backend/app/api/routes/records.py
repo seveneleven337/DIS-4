@@ -1,0 +1,92 @@
+from datetime import date
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.adapters.mongodb.database import database
+from app.api.dependencies import get_postgresql_session
+from app.schemas.filters import RecordFilters
+from app.schemas.record import RecordResponse
+from app.services.distributed import DistributedRecordService
+
+
+router = APIRouter(
+    prefix="/records",
+    tags=["Records"],
+)
+
+
+@router.get(
+    "",
+    response_model=list[RecordResponse],
+)
+async def get_records(
+    source: Literal["ALL", "POSTGRESQL", "MONGODB"] = Query(
+        default="ALL"
+    ),
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    order_id: str | None = None,
+    customer_id: str | None = None,
+    customer_name: str | None = None,
+    customer_segment: str | None = None,
+    product_id: str | None = None,
+    product_name: str | None = None,
+    product_category: str | None = None,
+    store_id: str | None = None,
+    country: str | None = None,
+    region: str | None = None,
+    city: str | None = None,
+    sales_representative_id: int | None = None,
+    promotion_code: str | None = None,
+    order_status: str | None = None,
+    sales_channel: str | None = None,
+    payment_method: str | None = None,
+    shipping_method: str | None = None,
+    order_date_from: date | None = None,
+    order_date_to: date | None = None,
+    has_return: bool | None = None,
+    session: AsyncSession = Depends(get_postgresql_session),
+):
+    try:
+        filters = RecordFilters(
+            order_id=order_id,
+            customer_id=customer_id,
+            customer_name=customer_name,
+            customer_segment=customer_segment,
+            product_id=product_id,
+            product_name=product_name,
+            product_category=product_category,
+            store_id=store_id,
+            country=country,
+            region=region,
+            city=city,
+            sales_representative_id=sales_representative_id,
+            promotion_code=promotion_code,
+            order_status=order_status,
+            sales_channel=sales_channel,
+            payment_method=payment_method,
+            shipping_method=shipping_method,
+            order_date_from=order_date_from,
+            order_date_to=order_date_to,
+            has_return=has_return,
+        )
+
+        service = DistributedRecordService(
+            session=session,
+            mongodb_database=database,
+        )
+
+        return await service.get_all(
+            source=source,
+            limit=limit,
+            offset=offset,
+            filters=filters,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc

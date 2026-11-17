@@ -1,4 +1,3 @@
-
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -16,6 +15,7 @@ from app.adapters.postgresql.database import (
     close_postgresql_connection,
 )
 from app.adapters.postgresql.schema import create_database_schema
+from app.api.routes.records import router as records_router
 from app.loaders.postgresql_seed import seed_postgresql
 
 
@@ -43,6 +43,11 @@ app = FastAPI(
     description="Backend API for a distributed SQL and NoSQL database system.",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.include_router(
+    records_router,
+    prefix="/api",
 )
 
 

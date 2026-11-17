@@ -119,6 +119,82 @@ class MongoDBRepository:
 
         return documents
 
+    @staticmethod
+    def validate_document_versions(
+        documents: list[dict],
+        expected_versions: dict[str, int],
+    ) -> None:
+        document_versions = {}
+
+        for document in documents:
+            order_id = document.get("_id")
+            version = document.get("_version")
+
+            if not isinstance(order_id, str):
+                raise ValueError(
+                    "MongoDB document has an invalid order ID."
+                )
+
+            if order_id in document_versions:
+                raise ValueError(
+                    f"Duplicate MongoDB document for order '{order_id}'."
+                )
+
+            if (
+                not isinstance(version, int)
+                or isinstance(version, bool)
+                or version < 1
+            ):
+                raise ValueError(
+                    f"MongoDB document '{order_id}' has an invalid _version."
+                )
+
+            document_versions[order_id] = version
+
+        expected_ids = set(expected_versions)
+        actual_ids = set(document_versions)
+
+        missing_ids = sorted(expected_ids - actual_ids)
+        unexpected_ids = sorted(actual_ids - expected_ids)
+
+        if missing_ids or unexpected_ids:
+            details = []
+
+            if missing_ids:
+                details.append(
+                    "Missing MongoDB documents: "
+                    + ", ".join(missing_ids)
+                )
+
+            if unexpected_ids:
+                details.append(
+                    "Unexpected MongoDB documents: "
+                    + ", ".join(unexpected_ids)
+                )
+
+            raise ValueError("; ".join(details))
+
+        for order_id in sorted(expected_ids):
+            expected_version = expected_versions[order_id]
+            actual_version = document_versions[order_id]
+
+            if (
+                not isinstance(expected_version, int)
+                or isinstance(expected_version, bool)
+                or expected_version < 1
+            ):
+                raise ValueError(
+                    f"PostgreSQL metadata for order '{order_id}' "
+                    "has an invalid version."
+                )
+
+            if actual_version != expected_version:
+                raise ValueError(
+                    f"Version mismatch for order '{order_id}': "
+                    f"PostgreSQL={expected_version}, "
+                    f"MongoDB={actual_version}."
+                )
+
     async def get_all(
         self,
         limit: int = 100,

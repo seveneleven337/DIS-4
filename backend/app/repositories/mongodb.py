@@ -195,6 +195,55 @@ class MongoDBRepository:
                     f"MongoDB={actual_version}."
                 )
 
+    async def replace_document_with_version(
+        self,
+        document: dict,
+        expected_version: int,
+    ) -> dict:
+        order_id = document.get("_id")
+
+        if not isinstance(order_id, str):
+            raise ValueError("MongoDB document has an invalid order ID.")
+
+        if (
+            not isinstance(expected_version, int)
+            or isinstance(expected_version, bool)
+            or expected_version < 1
+        ):
+            raise ValueError("Expected MongoDB version must be a positive integer.")
+
+        replacement = dict(document)
+        replacement["_version"] = expected_version + 1
+
+        result = await self.collection.replace_one(
+            {
+                "_id": order_id,
+                "_version": expected_version,
+            },
+            replacement,
+        )
+
+        if result.matched_count != 1:
+            current = await self.collection.find_one(
+                {"_id": order_id},
+                projection={"_version": 1},
+            )
+
+            if current is None:
+                raise ValueError(
+                    f"MongoDB document '{order_id}' does not exist."
+                )
+
+            current_version = current.get("_version")
+
+            raise ValueError(
+                f"MongoDB version conflict for order '{order_id}': "
+                f"expected={expected_version}, "
+                f"actual={current_version}."
+            )
+
+        return replacement
+
     async def get_all(
         self,
         limit: int = 100,

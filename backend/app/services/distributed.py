@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.mongodb import MongoDBRepository
 from app.repositories.postgresql import PostgreSQLRepository
+from app.schemas.filters import RecordFilters
 from app.schemas.record import RecordResponse
 
 
@@ -63,6 +64,7 @@ class DistributedRecordService:
         source: RecordSource = "ALL",
         limit: int = 100,
         offset: int = 0,
+        filters: RecordFilters | None = None,
     ) -> list[RecordResponse]:
         if source not in {"ALL", "POSTGRESQL", "MONGODB"}:
             raise ValueError(f"Unsupported record source: {source}")
@@ -97,6 +99,7 @@ class DistributedRecordService:
             postgres_records = await self.postgresql_repository.get_all(
                 limit=len(metadata_records),
                 offset=0,
+                filters=filters,
             )
 
             records_by_id.update({
@@ -105,19 +108,24 @@ class DistributedRecordService:
             })
 
         if source in {"ALL", "MONGODB"}:
-            storage_locations = {
+            mongo_storage_locations = {
                 item.order_id: (
                     item.storage_location,
                     item.version,
                 )
                 for item in metadata_records
-                if item.storage_location in {"MONGODB", "BOTH"}
+                if (
+                    item.storage_location == "MONGODB"
+                    if source == "ALL"
+                    else item.storage_location in {"MONGODB", "BOTH"}
+                )
             }
 
             mongo_records = await self.mongodb_repository.get_all_records(
-                storage_locations=storage_locations,
+                storage_locations=mongo_storage_locations,
                 limit=len(metadata_records),
                 offset=0,
+                filters=filters,
             )
 
             for record in mongo_records:
@@ -126,7 +134,13 @@ class DistributedRecordService:
                     record,
                 )
 
-        paginated_metadata = metadata_records[offset:offset + limit]
+        matched_metadata = [
+            item
+            for item in metadata_records
+            if item.order_id in records_by_id
+        ]
+
+        paginated_metadata = matched_metadata[offset:offset + limit]
 
         records = []
 

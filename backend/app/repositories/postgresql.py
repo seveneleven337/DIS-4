@@ -1,4 +1,3 @@
-
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +23,7 @@ from app.models import (
     Store,
     Transaction,
 )
+from app.schemas.filters import RecordFilters
 from app.schemas.record import RecordResponse
 
 
@@ -84,6 +84,67 @@ class PostgreSQLRepository:
                 )
             )
         )
+
+    def _apply_filters(self, statement, filters: RecordFilters):
+        exact_filters = {
+            "order_id": OrderDB.order_id,
+            "customer_id": CustomerDB.customer_id,
+            "product_id": ProductDB.product_id,
+            "store_id": StoreDB.store_id,
+            "sales_representative_id": (
+                OrderDB.sales_representative_id
+            ),
+            "promotion_code": OrderDB.promotion_code,
+            "order_status": OrderDB.order_status,
+            "sales_channel": OrderDB.sales_channel,
+            "payment_method": OrderDB.payment_method,
+            "shipping_method": OrderDB.shipping_method,
+        }
+
+        for field, column in exact_filters.items():
+            value = getattr(filters, field)
+
+            if value is not None:
+                statement = statement.where(column == value)
+
+        text_filters = {
+            "customer_name": CustomerDB.customer_name,
+            "customer_segment": CustomerDB.customer_segment,
+            "product_name": ProductDB.product_name,
+            "product_category": ProductDB.product_category,
+            "country": StoreDB.country,
+            "region": StoreDB.region,
+            "city": StoreDB.city,
+        }
+
+        for field, column in text_filters.items():
+            value = getattr(filters, field)
+
+            if value is not None:
+                statement = statement.where(
+                    column.ilike(f"%{value}%")
+                )
+
+        if filters.order_date_from is not None:
+            statement = statement.where(
+                OrderDB.order_date >= filters.order_date_from
+            )
+
+        if filters.order_date_to is not None:
+            statement = statement.where(
+                OrderDB.order_date <= filters.order_date_to
+            )
+
+        if filters.has_return is True:
+            statement = statement.where(
+                ReturnDB.order_id.is_not(None)
+            )
+        elif filters.has_return is False:
+            statement = statement.where(
+                ReturnDB.order_id.is_(None)
+            )
+
+        return statement
 
     def _to_response(self, row) -> RecordResponse:
         (
@@ -163,9 +224,15 @@ class PostgreSQLRepository:
         self,
         limit: int = 100,
         offset: int = 0,
+        filters: RecordFilters | None = None,
     ) -> list[RecordResponse]:
+        statement = self._build_query()
+
+        if filters is not None:
+            statement = self._apply_filters(statement, filters)
+
         statement = (
-            self._build_query()
+            statement
             .order_by(OrderDB.order_id)
             .limit(limit)
             .offset(offset)

@@ -1,15 +1,87 @@
+import re
+
 from pymongo.errors import DuplicateKeyError
 
 from app.adapters.mongodb.mapper import (
     from_mongodb_document,
     to_mongodb_document,
 )
+from app.schemas.filters import RecordFilters
 from app.schemas.record import RecordResponse
 
 
 class MongoDBRepository:
     def __init__(self, database):
         self.collection = database["orders"]
+
+    @staticmethod
+    def _build_filter(filters: RecordFilters | None) -> dict:
+        if filters is None:
+            return {}
+
+        query = {}
+
+        exact_fields = {
+            "order_id": "_id",
+            "customer_id": "customer.customer_id",
+            "product_id": "transaction.product.product_id",
+            "store_id": "store.store_id",
+            "sales_representative_id": (
+                "sales_representative.sales_representative_id"
+            ),
+            "promotion_code": "promotion.promotion_code",
+            "order_status": "order_status",
+            "sales_channel": "sales_channel",
+            "payment_method": "payment_method",
+            "shipping_method": "shipping_method",
+        }
+
+        for filter_name, document_field in exact_fields.items():
+            value = getattr(filters, filter_name)
+
+            if value is not None:
+                query[document_field] = value
+
+        partial_fields = {
+            "customer_name": "customer.customer_name",
+            "customer_segment": "customer.customer_segment",
+            "product_name": "transaction.product.product_name",
+            "product_category": "transaction.product.product_category",
+            "country": "store.country",
+            "region": "store.region",
+            "city": "store.city",
+        }
+
+        for filter_name, document_field in partial_fields.items():
+            value = getattr(filters, filter_name)
+
+            if value is not None:
+                query[document_field] = {
+                    "$regex": re.escape(value),
+                    "$options": "i",
+                }
+
+        date_conditions = {}
+
+        if filters.order_date_from is not None:
+            date_conditions["$gte"] = (
+                filters.order_date_from.isoformat()
+            )
+
+        if filters.order_date_to is not None:
+            date_conditions["$lte"] = (
+                filters.order_date_to.isoformat()
+            )
+
+        if date_conditions:
+            query["order_date"] = date_conditions
+
+        if filters.has_return is True:
+            query["return"] = {"$exists": True}
+        elif filters.has_return is False:
+            query["return"] = {"$exists": False}
+
+        return query
 
     async def get_by_order_id(self, order_id: str) -> dict | None:
         return await self.collection.find_one({"_id": order_id})
@@ -18,13 +90,17 @@ class MongoDBRepository:
         self,
         limit: int = 100,
         offset: int = 0,
+        filters: RecordFilters | None = None,
     ) -> list[dict]:
+        query = self._build_filter(filters)
+
         cursor = (
-            self.collection.find({})
+            self.collection.find(query)
             .sort("_id", 1)
             .skip(offset)
             .limit(limit)
         )
+
         return await cursor.to_list(length=limit)
 
     async def get_record_by_order_id(
@@ -49,8 +125,13 @@ class MongoDBRepository:
         storage_locations: dict[str, tuple[str, int]],
         limit: int = 100,
         offset: int = 0,
+        filters: RecordFilters | None = None,
     ) -> list[RecordResponse]:
-        documents = await self.get_all(limit=limit, offset=offset)
+        documents = await self.get_all(
+            limit=limit,
+            offset=offset,
+            filters=filters,
+        )
 
         records = []
 

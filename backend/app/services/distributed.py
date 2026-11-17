@@ -91,44 +91,53 @@ class DistributedRecordService:
                 if item.storage_location in {"MONGODB", "BOTH"}
             ]
 
+        records_by_id: dict[str, RecordResponse] = {}
+
+        if source in {"ALL", "POSTGRESQL"}:
+            postgres_records = await self.postgresql_repository.get_all(
+                limit=len(metadata_records),
+                offset=0,
+            )
+
+            records_by_id.update({
+                record.order.order_id: record
+                for record in postgres_records
+            })
+
+        if source in {"ALL", "MONGODB"}:
+            storage_locations = {
+                item.order_id: (
+                    item.storage_location,
+                    item.version,
+                )
+                for item in metadata_records
+                if item.storage_location in {"MONGODB", "BOTH"}
+            }
+
+            mongo_records = await self.mongodb_repository.get_all_records(
+                storage_locations=storage_locations,
+                limit=len(metadata_records),
+                offset=0,
+            )
+
+            for record in mongo_records:
+                records_by_id.setdefault(
+                    record.order.order_id,
+                    record,
+                )
+
         paginated_metadata = metadata_records[offset:offset + limit]
 
         records = []
 
         for metadata in paginated_metadata:
-            order_id = metadata.order_id
+            record = records_by_id.get(metadata.order_id)
 
-            use_postgresql = (
-                source == "POSTGRESQL"
-                or (
-                    source == "ALL"
-                    and metadata.storage_location in {"POSTGRESQL", "BOTH"}
+            if record is None:
+                raise RuntimeError(
+                    f"Metadata exists for {metadata.order_id}, "
+                    "but the corresponding database record is missing"
                 )
-            )
-
-            if use_postgresql:
-                record = await self.postgresql_repository.get_by_order_id(
-                    order_id
-                )
-
-                if record is None:
-                    raise RuntimeError(
-                        f"Metadata exists for {order_id}, "
-                        "but the PostgreSQL record is missing"
-                    )
-
-            else:
-                record = await self.mongodb_repository.get_record_by_order_id(
-                    order_id=order_id,
-                    storage_location=metadata.storage_location,
-                    version=metadata.version,
-                )
-
-                if record is None:
-                    raise RuntimeError(
-                        f"Metadata exists for {order_id}, "
-                        "but the MongoDB document is missing"
-                    )
 
             records.append(record)
 

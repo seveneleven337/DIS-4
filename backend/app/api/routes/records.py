@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.mongodb.database import database
 from app.api.dependencies import get_postgresql_session
 from app.schemas.filters import RecordFilters
-from app.schemas.record import RecordCreate, RecordResponse
+from app.schemas.record import (
+    RecordCreate,
+    RecordResponse,
+    RecordUpdate,
+)
 from app.services.distributed import DistributedRecordService
 
 
@@ -33,6 +37,33 @@ async def create_record(
 
     try:
         return await service.create(record)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.put(
+    "/{order_id}",
+    response_model=RecordResponse,
+)
+async def update_record(
+    order_id: str,
+    record: RecordUpdate,
+    session: AsyncSession = Depends(get_postgresql_session),
+):
+    service = DistributedRecordService(
+        session=session,
+        mongodb_database=database,
+    )
+
+    try:
+        return await service.update(
+            order_id=order_id,
+            record=record,
+        )
 
     except ValueError as exc:
         raise HTTPException(

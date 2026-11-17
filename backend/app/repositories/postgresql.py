@@ -24,7 +24,7 @@ from app.models import (
     Transaction,
 )
 from app.schemas.filters import RecordFilters
-from app.schemas.record import RecordResponse
+from app.schemas.record import RecordResponse, RecordUpdate
 
 
 class PostgreSQLRepository:
@@ -446,9 +446,11 @@ class PostgreSQLRepository:
         values: dict,
         key: str,
     ) -> None:
+        entity_id = values[key]
+
         statement = (
             update(model)
-            .where(getattr(model, key) == values[key])
+            .where(getattr(model, key) == entity_id)
             .values(**values)
         )
 
@@ -456,105 +458,64 @@ class PostgreSQLRepository:
 
         if result.rowcount != 1:
             raise ValueError(
-                f"Related entity '{values[key]}' was not found."
+                f"Related entity '{entity_id}' was not found."
             )
 
-    async def update(
+    async def update_shared_entities(
         self,
-        record: RecordResponse,
-    ) -> RecordResponse:
-        if record.storage_location not in ("POSTGRESQL", "BOTH"):
-            raise ValueError(
-                "PostgreSQL cannot update a record stored only in MongoDB."
-            )
-
-        if record.order.order_id != record.transaction.order_id:
-            raise ValueError(
-                "Order ID and transaction Order ID must match."
-            )
-
-        if record.return_record is not None:
-            if record.return_record.order_id != record.order.order_id:
-                raise ValueError(
-                    "Return Order ID must match the Order ID."
-                )
-
-        existing = await self.get_by_order_id(
-            record.order.order_id
+        record: RecordUpdate,
+        existing: RecordResponse,
+    ) -> None:
+        entities = (
+            (
+                CustomerDB,
+                record.customer,
+                existing.customer,
+                "customer_id",
+            ),
+            (
+                StoreDB,
+                record.store,
+                existing.store,
+                "store_id",
+            ),
+            (
+                SalesRepresentativeDB,
+                record.sales_representative,
+                existing.sales_representative,
+                "sales_representative_id",
+            ),
+            (
+                ProductDB,
+                record.product,
+                existing.product,
+                "product_id",
+            ),
         )
 
-        if existing is None:
-            raise ValueError(
-                f"Order '{record.order.order_id}' does not exist."
+        for model, new_entity, old_entity, key in entities:
+            if new_entity == old_entity:
+                continue
+
+            entity_id = getattr(new_entity, key)
+            existing_entity = await self.session.get(
+                model,
+                entity_id,
             )
 
-        if existing.storage_location != record.storage_location:
-            raise ValueError(
-                "Storage location cannot be changed by this repository."
-            )
+            if existing_entity is None:
+                continue
 
-        if existing.order.customer_id != record.order.customer_id:
-            raise ValueError("Customer ID cannot be changed.")
-
-        if existing.order.store_id != record.order.store_id:
-            raise ValueError("Store ID cannot be changed.")
-
-        if (
-            existing.order.sales_representative_id
-            != record.order.sales_representative_id
-        ):
-            raise ValueError(
-                "Sales representative ID cannot be changed."
-            )
-
-        if existing.order.promotion_code != record.order.promotion_code:
-            raise ValueError("Promotion code cannot be changed.")
-
-        if (
-            existing.transaction.transaction_id
-            != record.transaction.transaction_id
-        ):
-            raise ValueError("Transaction ID cannot be changed.")
-
-        if existing.transaction.product_id != record.transaction.product_id:
-            raise ValueError("Product ID cannot be changed.")
-
-        if record.version != existing.version:
-            raise ValueError(
-                "Version conflict: the record has been modified."
-            )
-
-        await self._update_entity(
-            CustomerDB,
-            record.customer.model_dump(),
-            "customer_id",
-        )
-
-        await self._update_entity(
-            StoreDB,
-            record.store.model_dump(),
-            "store_id",
-        )
-
-        await self._update_entity(
-            SalesRepresentativeDB,
-            record.sales_representative.model_dump(),
-            "sales_representative_id",
-        )
-
-        await self._update_entity(
-            ProductDB,
-            record.product.model_dump(),
-            "product_id",
-        )
-
-        if record.promotion is not None:
             await self._update_entity(
-                PromotionDB,
-                record.promotion.model_dump(),
-                "promotion_code",
+                model,
+                new_entity.model_dump(),
+                key,
             )
 
+    async def update_order_data(
+        self,
+        record: RecordUpdate,
+    ) -> None:
         await self._update_entity(
             OrderDB,
             record.order.model_dump(),
@@ -567,18 +528,27 @@ class PostgreSQLRepository:
             "transaction_id",
         )
 
-        if record.return_record is None:
-            await self.session.execute(
-                delete(ReturnDB).where(
-                    ReturnDB.order_id == record.order.order_id
-                )
+        existing_return = await self.session.scalar(
+            select(ReturnDB.order_id).where(
+                ReturnDB.order_id == record.order.order_id
             )
-        elif existing.return_record is None:
+        )
+
+        if record.return_record is None:
+            if existing_return is not None:
+                await self.session.execute(
+                    delete(ReturnDB).where(
+                        ReturnDB.order_id == record.order.order_id
+                    )
+                )
+
+        elif existing_return is None:
             await self.session.execute(
                 pg_insert(ReturnDB).values(
                     **record.return_record.model_dump()
                 )
             )
+
         else:
             await self._update_entity(
                 ReturnDB,
@@ -586,27 +556,48 @@ class PostgreSQLRepository:
                 "order_id",
             )
 
-        version_statement = (
-            update(RecordLocationDB)
-            .where(
-                RecordLocationDB.order_id == record.order.order_id,
-                RecordLocationDB.version == record.version,
+    async def increment_storage_versions(
+        self,
+        expected_versions: dict[str, int],
+    ) -> dict[str, int]:
+        if not expected_versions:
+            return {}
+
+        new_versions = {}
+
+        for order_id in sorted(expected_versions):
+            expected_version = expected_versions[order_id]
+
+            if (
+                isinstance(expected_version, bool)
+                or not isinstance(expected_version, int)
+                or expected_version < 1
+            ):
+                raise ValueError(
+                    f"Invalid expected version for order '{order_id}'."
+                )
+
+            statement = (
+                update(RecordLocationDB)
+                .where(
+                    RecordLocationDB.order_id == order_id,
+                    RecordLocationDB.version == expected_version,
+                )
+                .values(
+                    version=RecordLocationDB.version + 1
+                )
             )
-            .values(version=RecordLocationDB.version + 1)
-        )
 
-        version_result = await self.session.execute(
-            version_statement
-        )
+            result = await self.session.execute(statement)
 
-        if version_result.rowcount != 1:
-            raise ValueError(
-                "Version conflict: the record has been modified."
-            )
+            if result.rowcount != 1:
+                raise ValueError(
+                    f"Version conflict for order '{order_id}'."
+                )
 
-        return record.model_copy(
-            update={"version": record.version + 1}
-        )
+            new_versions[order_id] = expected_version + 1
+
+        return new_versions
 
     async def delete(
         self,
@@ -677,7 +668,9 @@ class PostgreSQLRepository:
             )
 
         if version < 1:
-            raise ValueError("Version must be greater than or equal to 1.")
+            raise ValueError(
+                "Version must be greater than or equal to 1."
+            )
 
         existing = await self.get_storage_location(order_id)
 

@@ -210,7 +210,9 @@ class MongoDBRepository:
             or isinstance(expected_version, bool)
             or expected_version < 1
         ):
-            raise ValueError("Expected MongoDB version must be a positive integer.")
+            raise ValueError(
+                "Expected MongoDB version must be a positive integer."
+            )
 
         replacement = dict(document)
         replacement["_version"] = expected_version + 1
@@ -243,6 +245,76 @@ class MongoDBRepository:
             )
 
         return replacement
+
+    async def restore_document_with_version(
+        self,
+        snapshot: dict,
+        expected_current_version: int,
+    ) -> dict:
+        order_id = snapshot.get("_id")
+        snapshot_version = snapshot.get("_version")
+
+        if not isinstance(order_id, str):
+            raise ValueError(
+                "MongoDB snapshot has an invalid order ID."
+            )
+
+        if (
+            not isinstance(snapshot_version, int)
+            or isinstance(snapshot_version, bool)
+            or snapshot_version < 1
+        ):
+            raise ValueError(
+                f"MongoDB snapshot '{order_id}' has an invalid _version."
+            )
+
+        if (
+            not isinstance(expected_current_version, int)
+            or isinstance(expected_current_version, bool)
+            or expected_current_version < 1
+        ):
+            raise ValueError(
+                "Expected current MongoDB version must be a positive integer."
+            )
+
+        if expected_current_version != snapshot_version + 1:
+            raise ValueError(
+                f"Invalid compensation versions for order '{order_id}': "
+                f"snapshot={snapshot_version}, "
+                f"expected_current={expected_current_version}."
+            )
+
+        original_document = dict(snapshot)
+
+        result = await self.collection.replace_one(
+            {
+                "_id": order_id,
+                "_version": expected_current_version,
+            },
+            original_document,
+        )
+
+        if result.matched_count != 1:
+            current = await self.collection.find_one(
+                {"_id": order_id},
+                projection={"_version": 1},
+            )
+
+            if current is None:
+                raise ValueError(
+                    f"Cannot compensate order '{order_id}': "
+                    "MongoDB document does not exist."
+                )
+
+            current_version = current.get("_version")
+
+            raise ValueError(
+                f"MongoDB compensation conflict for order '{order_id}': "
+                f"expected_current={expected_current_version}, "
+                f"actual={current_version}."
+            )
+
+        return original_document
 
     async def get_all(
         self,

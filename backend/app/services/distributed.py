@@ -2,10 +2,18 @@ from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.mongodb.mapper import (
+    from_mongodb_document,
+    to_mongodb_document,
+)
 from app.repositories.mongodb import MongoDBRepository
 from app.repositories.postgresql import PostgreSQLRepository
 from app.schemas.filters import RecordFilters
-from app.schemas.record import RecordCreate, RecordResponse
+from app.schemas.record import (
+    RecordCreate,
+    RecordResponse,
+    RecordUpdate,
+)
 
 
 RecordSource = Literal["ALL", "POSTGRESQL", "MONGODB"]
@@ -15,6 +23,104 @@ class DistributedRecordService:
     def __init__(self, session: AsyncSession, mongodb_database):
         self.postgresql_repository = PostgreSQLRepository(session)
         self.mongodb_repository = MongoDBRepository(mongodb_database)
+
+    @staticmethod
+    def _validate_immutable_ids(
+        existing: RecordResponse,
+        record: RecordUpdate,
+    ) -> None:
+        immutable_ids = (
+            (
+                "Customer ID",
+                existing.customer.customer_id,
+                record.customer.customer_id,
+            ),
+            (
+                "Store ID",
+                existing.store.store_id,
+                record.store.store_id,
+            ),
+            (
+                "Sales representative ID",
+                existing.sales_representative.sales_representative_id,
+                record.sales_representative.sales_representative_id,
+            ),
+            (
+                "Product ID",
+                existing.product.product_id,
+                record.product.product_id,
+            ),
+            (
+                "Order ID",
+                existing.order.order_id,
+                record.order.order_id,
+            ),
+            (
+                "Transaction ID",
+                existing.transaction.transaction_id,
+                record.transaction.transaction_id,
+            ),
+            (
+                "Transaction Order ID",
+                existing.transaction.order_id,
+                record.transaction.order_id,
+            ),
+            (
+                "Promotion code",
+                (
+                    existing.promotion.promotion_code
+                    if existing.promotion is not None
+                    else None
+                ),
+                (
+                    record.promotion.promotion_code
+                    if record.promotion is not None
+                    else None
+                ),
+            ),
+        )
+
+        for label, old_value, new_value in immutable_ids:
+            if old_value != new_value:
+                raise ValueError(
+                    f"{label} cannot be changed."
+                )
+
+        if record.return_record is not None:
+            if (
+                record.return_record.order_id
+                != record.order.order_id
+            ):
+                raise ValueError(
+                    "Return Order ID must match the target Order ID."
+                )
+
+            if (
+                existing.return_record is not None
+                and existing.return_record.order_id
+                != record.return_record.order_id
+            ):
+                raise ValueError(
+                    "Return Order ID cannot be changed."
+                )
+
+    @staticmethod
+    def _get_changed_entities(
+        existing: RecordResponse,
+        record: RecordUpdate,
+    ) -> dict:
+        entity_names = (
+            "customer",
+            "store",
+            "sales_representative",
+            "product",
+        )
+
+        return {
+            name: getattr(record, name)
+            for name in entity_names
+            if getattr(record, name) != getattr(existing, name)
+        }
 
     async def create(self, record: RecordCreate) -> RecordResponse:
         response = RecordResponse.model_validate({
@@ -79,6 +185,290 @@ class DistributedRecordService:
             raise
 
         return response
+
+    async def update(
+        self,
+        order_id: str,
+        record: RecordUpdate,
+    ) -> RecordResponse:
+        if record.order.order_id != order_id:
+            raise ValueError(
+                "The URL Order ID must match the request Order ID."
+            )
+
+        snapshots: dict[str, dict] = {}
+        modified_mongo_ids: list[str] = []
+
+        try:
+            async with self.postgresql_repository.session.begin():
+                initial_metadata = (
+                    await self.postgresql_repository.get_storage_location(
+                        order_id
+                    )
+                )
+
+                if initial_metadata is None:
+                    raise ValueError(
+                        f"Order '{order_id}' does not exist."
+                    )
+
+                storage_location = initial_metadata.storage_location
+
+                if storage_location not in {
+                    "POSTGRESQL",
+                    "MONGODB",
+                    "BOTH",
+                }:
+                    raise ValueError(
+                        f"Unsupported storage location: {storage_location}"
+                    )
+
+                if storage_location in {"POSTGRESQL", "BOTH"}:
+                    existing = (
+                        await self.postgresql_repository.get_by_order_id(
+                            order_id
+                        )
+                    )
+                else:
+                    existing = (
+                        await self.mongodb_repository.get_record_by_order_id(
+                            order_id=order_id,
+                            storage_location=storage_location,
+                            version=initial_metadata.version,
+                        )
+                    )
+
+                if existing is None:
+                    raise RuntimeError(
+                        f"Metadata exists for {order_id}, "
+                        "but the corresponding record is missing."
+                    )
+
+                if existing.version != initial_metadata.version:
+                    raise RuntimeError(
+                        f"Record version mismatch for {order_id}: "
+                        f"metadata={initial_metadata.version}, "
+                        f"record={existing.version}."
+                    )
+
+                self._validate_immutable_ids(existing, record)
+
+                if record.expected_version != initial_metadata.version:
+                    raise ValueError(
+                        f"Version conflict for order '{order_id}': "
+                        f"expected={record.expected_version}, "
+                        f"actual={initial_metadata.version}."
+                    )
+
+                changed_entities = self._get_changed_entities(
+                    existing,
+                    record,
+                )
+
+                affected_arguments = {
+                    "order_id": order_id,
+                    "customer_id": (
+                        record.customer.customer_id
+                        if "customer" in changed_entities
+                        else None
+                    ),
+                    "store_id": (
+                        record.store.store_id
+                        if "store" in changed_entities
+                        else None
+                    ),
+                    "sales_representative_id": (
+                        record.sales_representative.sales_representative_id
+                        if "sales_representative" in changed_entities
+                        else None
+                    ),
+                    "product_id": (
+                        record.product.product_id
+                        if "product" in changed_entities
+                        else None
+                    ),
+                }
+
+                postgres_affected_ids = set(
+                    await self.postgresql_repository.get_affected_order_ids(
+                        **affected_arguments
+                    )
+                )
+
+                mongo_affected_ids = set(
+                    await self.mongodb_repository.get_affected_order_ids(
+                        **affected_arguments
+                    )
+                )
+
+                affected_ids = sorted(
+                    postgres_affected_ids
+                    | mongo_affected_ids
+                    | {order_id}
+                )
+
+                locked_locations = (
+                    await self.postgresql_repository.lock_storage_locations(
+                        affected_ids
+                    )
+                )
+
+                metadata_by_id = {
+                    item.order_id: item
+                    for item in locked_locations
+                }
+
+                locked_target = metadata_by_id.get(order_id)
+
+                if locked_target is None:
+                    raise RuntimeError(
+                        f"Storage metadata for '{order_id}' disappeared."
+                    )
+
+                if locked_target.storage_location != storage_location:
+                    raise RuntimeError(
+                        f"Storage location changed for '{order_id}'."
+                    )
+
+                if locked_target.version != record.expected_version:
+                    raise ValueError(
+                        f"Version conflict for order '{order_id}': "
+                        f"expected={record.expected_version}, "
+                        f"actual={locked_target.version}."
+                    )
+
+                expected_postgres_ids = {
+                    item.order_id
+                    for item in locked_locations
+                    if item.storage_location in {"POSTGRESQL", "BOTH"}
+                }
+
+                expected_mongo_ids = {
+                    item.order_id
+                    for item in locked_locations
+                    if item.storage_location in {"MONGODB", "BOTH"}
+                }
+
+                if postgres_affected_ids != expected_postgres_ids:
+                    raise RuntimeError(
+                        "PostgreSQL affected records do not match "
+                        "the storage metadata."
+                    )
+
+                if mongo_affected_ids != expected_mongo_ids:
+                    raise RuntimeError(
+                        "MongoDB affected documents do not match "
+                        "the storage metadata."
+                    )
+
+                expected_versions = {
+                    item.order_id: item.version
+                    for item in locked_locations
+                }
+
+                mongo_documents = (
+                    await self.mongodb_repository.get_documents_by_order_ids(
+                        sorted(expected_mongo_ids)
+                    )
+                )
+
+                self.mongodb_repository.validate_document_versions(
+                    documents=mongo_documents,
+                    expected_versions={
+                        order_id: expected_versions[order_id]
+                        for order_id in expected_mongo_ids
+                    },
+                )
+
+                documents_by_id = {
+                    document["_id"]: document
+                    for document in mongo_documents
+                }
+
+                for affected_id in sorted(expected_mongo_ids):
+                    metadata = metadata_by_id[affected_id]
+                    snapshot = documents_by_id[affected_id]
+
+                    snapshots[affected_id] = snapshot
+
+                    if affected_id == order_id:
+                        updated_record = RecordResponse.model_validate({
+                            **record.model_dump(
+                                exclude={"expected_version"}
+                            ),
+                            "storage_location": storage_location,
+                            "version": metadata.version,
+                        })
+                    else:
+                        mongo_record = from_mongodb_document(
+                            document=snapshot,
+                            storage_location=metadata.storage_location,
+                            version=metadata.version,
+                        )
+
+                        updated_record = mongo_record.model_copy(
+                            update=changed_entities
+                        )
+
+                    updated_document = to_mongodb_document(
+                        updated_record,
+                        version=metadata.version,
+                    )
+
+                    await self.mongodb_repository.replace_document_with_version(
+                        document=updated_document,
+                        expected_version=metadata.version,
+                    )
+
+                    modified_mongo_ids.append(affected_id)
+
+                await self.postgresql_repository.update_shared_entities(
+                    record=record,
+                    existing=existing,
+                )
+
+                if storage_location in {"POSTGRESQL", "BOTH"}:
+                    await self.postgresql_repository.update_order_data(
+                        record
+                    )
+
+                await self.postgresql_repository.increment_storage_versions(
+                    expected_versions
+                )
+
+        except Exception as exc:
+            compensation_errors = []
+
+            for modified_id in reversed(modified_mongo_ids):
+                snapshot = snapshots[modified_id]
+                expected_current_version = (
+                    snapshot["_version"] + 1
+                )
+
+                try:
+                    await self.mongodb_repository.restore_document_with_version(
+                        snapshot=snapshot,
+                        expected_current_version=expected_current_version,
+                    )
+                except Exception as compensation_error:
+                    compensation_errors.append(
+                        f"{modified_id}: {compensation_error}"
+                    )
+
+            if compensation_errors:
+                raise RuntimeError(
+                    "Distributed update failed and MongoDB compensation "
+                    "was incomplete. Manual reconciliation is required. "
+                    + "; ".join(compensation_errors)
+                ) from exc
+
+            raise
+
+        return RecordResponse.model_validate({
+            **record.model_dump(exclude={"expected_version"}),
+            "storage_location": storage_location,
+            "version": record.expected_version + 1,
+        })
 
     async def get_by_order_id(
         self,

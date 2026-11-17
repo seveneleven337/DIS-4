@@ -90,3 +90,27 @@ async def get_records(
             status_code=422,
             detail=str(exc),
         ) from exc
+
+
+@router.get(
+    "/{order_id}",
+    response_model=RecordResponse,
+)
+async def get_record_by_order_id(
+    order_id: str,
+    session: AsyncSession = Depends(get_postgresql_session),
+):
+    service = DistributedRecordService(
+        session=session,
+        mongodb_database=database,
+    )
+
+    record = await service.get_by_order_id(order_id)
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Record {order_id} not found",
+        )
+
+    return record

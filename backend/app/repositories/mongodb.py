@@ -86,6 +86,39 @@ class MongoDBRepository:
     async def get_by_order_id(self, order_id: str) -> dict | None:
         return await self.collection.find_one({"_id": order_id})
 
+    async def get_documents_by_order_ids(
+        self,
+        order_ids: list[str],
+    ) -> list[dict]:
+        ordered_ids = sorted(set(order_ids))
+
+        if not ordered_ids:
+            return []
+
+        cursor = (
+            self.collection.find(
+                {"_id": {"$in": ordered_ids}}
+            )
+            .sort("_id", 1)
+        )
+
+        documents = await cursor.to_list(length=len(ordered_ids))
+
+        found_ids = {
+            document["_id"]
+            for document in documents
+        }
+
+        missing_ids = sorted(set(ordered_ids) - found_ids)
+
+        if missing_ids:
+            raise ValueError(
+                "MongoDB documents not found for orders: "
+                + ", ".join(missing_ids)
+            )
+
+        return documents
+
     async def get_all(
         self,
         limit: int = 100,

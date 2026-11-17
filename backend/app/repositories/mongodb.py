@@ -154,6 +154,53 @@ class MongoDBRepository:
 
         return records
 
+    async def get_affected_order_ids(
+        self,
+        order_id: str,
+        customer_id: str | None = None,
+        store_id: str | None = None,
+        sales_representative_id: int | None = None,
+        product_id: str | None = None,
+    ) -> list[str]:
+        conditions = [
+            {"_id": order_id},
+        ]
+
+        if customer_id is not None:
+            conditions.append(
+                {"customer.customer_id": customer_id}
+            )
+
+        if store_id is not None:
+            conditions.append(
+                {"store.store_id": store_id}
+            )
+
+        if sales_representative_id is not None:
+            conditions.append(
+                {
+                    "sales_representative.sales_representative_id":
+                    sales_representative_id
+                }
+            )
+
+        if product_id is not None:
+            conditions.append(
+                {"transaction.product.product_id": product_id}
+            )
+
+        cursor = (
+            self.collection.find(
+                {"$or": conditions},
+                projection={"_id": 1},
+            )
+            .sort("_id", 1)
+        )
+
+        documents = await cursor.to_list(length=None)
+
+        return [document["_id"] for document in documents]
+
     async def create(self, record: RecordResponse) -> dict:
         if record.storage_location not in {"MONGODB", "BOTH"}:
             raise ValueError(

@@ -305,6 +305,42 @@ class PostgreSQLRepository:
 
         return list(result.all())
 
+    async def lock_storage_locations(
+        self,
+        order_ids: list[str],
+    ) -> list[RecordLocationDB]:
+        ordered_ids = sorted(set(order_ids))
+
+        if not ordered_ids:
+            return []
+
+        statement = (
+            select(RecordLocationDB)
+            .where(
+                RecordLocationDB.order_id.in_(ordered_ids)
+            )
+            .order_by(RecordLocationDB.order_id)
+            .with_for_update()
+        )
+
+        result = await self.session.scalars(statement)
+        locations = list(result.all())
+
+        found_ids = {
+            location.order_id
+            for location in locations
+        }
+
+        missing_ids = sorted(set(ordered_ids) - found_ids)
+
+        if missing_ids:
+            raise ValueError(
+                "Storage metadata not found for orders: "
+                + ", ".join(missing_ids)
+            )
+
+        return locations
+
     async def _insert_entity_if_missing(
         self,
         model,

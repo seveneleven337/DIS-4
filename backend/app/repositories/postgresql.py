@@ -501,3 +501,25 @@ class PostgreSQLRepository:
         )
 
         return True
+
+    async def get_storage_location(
+        self,
+        order_id: str,
+    ) -> RecordLocationDB | None:
+        statement = select(RecordLocationDB).where(
+            RecordLocationDB.order_id == order_id
+        )
+
+        return await self.session.scalar(statement)
+
+    async def get_all_storage_locations(
+        self,
+    ) -> list[RecordLocationDB]:
+        statement = (
+            select(RecordLocationDB)
+            .order_by(RecordLocationDB.order_id)
+        )
+
+        result = await self.session.scalars(statement)
+
+        return list(result.all())

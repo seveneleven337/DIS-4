@@ -1,6 +1,9 @@
 from pymongo.errors import DuplicateKeyError
 
-from app.adapters.mongodb.mapper import to_mongodb_document
+from app.adapters.mongodb.mapper import (
+    from_mongodb_document,
+    to_mongodb_document,
+)
 from app.schemas.record import RecordResponse
 
 
@@ -23,6 +26,52 @@ class MongoDBRepository:
             .limit(limit)
         )
         return await cursor.to_list(length=limit)
+
+    async def get_record_by_order_id(
+        self,
+        order_id: str,
+        storage_location: str,
+        version: int,
+    ) -> RecordResponse | None:
+        document = await self.get_by_order_id(order_id)
+
+        if document is None:
+            return None
+
+        return from_mongodb_document(
+            document=document,
+            storage_location=storage_location,
+            version=version,
+        )
+
+    async def get_all_records(
+        self,
+        storage_locations: dict[str, tuple[str, int]],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[RecordResponse]:
+        documents = await self.get_all(limit=limit, offset=offset)
+
+        records = []
+
+        for document in documents:
+            order_id = document["_id"]
+            metadata = storage_locations.get(order_id)
+
+            if metadata is None:
+                continue
+
+            storage_location, version = metadata
+
+            records.append(
+                from_mongodb_document(
+                    document=document,
+                    storage_location=storage_location,
+                    version=version,
+                )
+            )
+
+        return records
 
     async def create(self, record: RecordResponse) -> dict:
         if record.storage_location not in {"MONGODB", "BOTH"}:

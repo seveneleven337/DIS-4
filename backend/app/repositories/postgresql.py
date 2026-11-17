@@ -245,6 +245,66 @@ class PostgreSQLRepository:
             for row in result.all()
         ]
 
+    async def get_affected_order_ids(
+        self,
+        order_id: str,
+        customer_id: str | None = None,
+        store_id: str | None = None,
+        sales_representative_id: int | None = None,
+        product_id: str | None = None,
+    ) -> list[str]:
+        from sqlalchemy import or_
+
+        conditions = [
+            OrderDB.order_id == order_id,
+        ]
+
+        if customer_id is not None:
+            conditions.append(
+                OrderDB.customer_id == customer_id
+            )
+
+        if store_id is not None:
+            conditions.append(
+                OrderDB.store_id == store_id
+            )
+
+        if sales_representative_id is not None:
+            conditions.append(
+                OrderDB.sales_representative_id
+                == sales_representative_id
+            )
+
+        if product_id is not None:
+            conditions.append(
+                TransactionDB.product_id == product_id
+            )
+
+        statement = (
+            select(OrderDB.order_id)
+            .select_from(OrderDB)
+            .join(
+                RecordLocationDB,
+                OrderDB.order_id == RecordLocationDB.order_id,
+            )
+            .join(
+                TransactionDB,
+                OrderDB.order_id == TransactionDB.order_id,
+            )
+            .where(
+                RecordLocationDB.storage_location.in_(
+                    ["POSTGRESQL", "BOTH"]
+                ),
+                or_(*conditions),
+            )
+            .distinct()
+            .order_by(OrderDB.order_id)
+        )
+
+        result = await self.session.scalars(statement)
+
+        return list(result.all())
+
     async def _insert_entity_if_missing(
         self,
         model,

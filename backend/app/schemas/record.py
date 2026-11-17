@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import (
     Customer,
@@ -17,7 +17,7 @@ from app.models import (
 StorageLocation = Literal["POSTGRESQL", "MONGODB", "BOTH"]
 
 
-class RecordCreate(BaseModel):
+class RecordData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     customer: Customer
@@ -28,8 +28,6 @@ class RecordCreate(BaseModel):
     order: Order
     transaction: Transaction
     return_record: Return | None
-
-    storage_location: StorageLocation
 
     @model_validator(mode="after")
     def validate_relationships(self):
@@ -84,17 +82,14 @@ class RecordCreate(BaseModel):
         return self
 
 
-class RecordResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    customer: Customer
-    store: Store
-    sales_representative: SalesRepresentative
-    product: Product
-    promotion: Promotion | None
-    order: Order
-    transaction: Transaction
-    return_record: Return | None
-
+class RecordCreate(RecordData):
     storage_location: StorageLocation
-    version: int
+
+
+class RecordUpdate(RecordData):
+    expected_version: int = Field(gt=0)
+
+
+class RecordResponse(RecordData):
+    storage_location: StorageLocation
+    version: int = Field(ge=1)

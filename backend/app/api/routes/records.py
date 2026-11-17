@@ -1,13 +1,13 @@
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.mongodb.database import database
 from app.api.dependencies import get_postgresql_session
 from app.schemas.filters import RecordFilters
-from app.schemas.record import RecordResponse
+from app.schemas.record import RecordCreate, RecordResponse
 from app.services.distributed import DistributedRecordService
 
 
@@ -15,6 +15,30 @@ router = APIRouter(
     prefix="/records",
     tags=["Records"],
 )
+
+
+@router.post(
+    "",
+    response_model=RecordResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_record(
+    record: RecordCreate,
+    session: AsyncSession = Depends(get_postgresql_session),
+):
+    service = DistributedRecordService(
+        session=session,
+        mongodb_database=database,
+    )
+
+    try:
+        return await service.create(record)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get(
@@ -87,7 +111,7 @@ async def get_records(
 
     except ValueError as exc:
         raise HTTPException(
-            status_code=422,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
 
@@ -109,7 +133,7 @@ async def get_record_by_order_id(
 
     if record is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Record {order_id} not found",
         )
 

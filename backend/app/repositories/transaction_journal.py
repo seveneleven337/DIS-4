@@ -118,6 +118,24 @@ class TransactionJournalRepository:
                 operation.status = new_status
                 operation.last_error = error
 
+    async def get_operation_status(
+        self,
+        operation_id: str,
+    ) -> str:
+        """Read the durable status using an independent database session."""
+        async with async_session_factory() as session:
+            statement = select(TransactionJournalDB.status).where(
+                TransactionJournalDB.operation_id == operation_id
+            )
+            status = await session.scalar(statement)
+
+        if status is None:
+            raise ValueError(
+                f"Journal operation not found: {operation_id}"
+            )
+
+        return status
+
     async def mark_database_committed(
         self,
         session: AsyncSession,

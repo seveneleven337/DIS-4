@@ -1,4 +1,6 @@
 import json
+
+from bson import json_util
 from typing import Literal
 from uuid import uuid4
 
@@ -284,8 +286,11 @@ class DistributedRecordService:
                 "The URL Order ID must match the request Order ID."
             )
 
+        operation_id = str(uuid4())
+        journal_created = False
         snapshots: dict[str, dict] = {}
         modified_mongo_ids: list[str] = []
+        storage_location = None
 
         try:
             async with self.postgresql_repository.session.begin():
@@ -463,8 +468,8 @@ class DistributedRecordService:
                 self.mongodb_repository.validate_document_versions(
                     documents=mongo_documents,
                     expected_versions={
-                        order_id: expected_versions[order_id]
-                        for order_id in expected_mongo_ids
+                        item_id: expected_versions[item_id]
+                        for item_id in expected_mongo_ids
                     },
                 )
 
@@ -473,11 +478,36 @@ class DistributedRecordService:
                     for document in mongo_documents
                 }
 
+                snapshots = {
+                    item_id: documents_by_id[item_id]
+                    for item_id in sorted(expected_mongo_ids)
+                }
+
+                # Persist complete recovery data before the first Mongo write.
+                recovery_payload = {
+                    "operation_id": operation_id,
+                    "order_id": order_id,
+                    "storage_location": storage_location,
+                    "affected_ids": affected_ids,
+                    "storage_locations": {
+                        item.order_id: item.storage_location
+                        for item in locked_locations
+                    },
+                    "original_versions": expected_versions,
+                    "mongo_snapshots": list(snapshots.values()),
+                }
+
+                await self.transaction_journal.create_operation(
+                    operation_id=operation_id,
+                    operation_type="UPDATE",
+                    order_id=order_id,
+                    payload=json_util.dumps(recovery_payload),
+                )
+                journal_created = True
+
                 for affected_id in sorted(expected_mongo_ids):
                     metadata = metadata_by_id[affected_id]
-                    snapshot = documents_by_id[affected_id]
-
-                    snapshots[affected_id] = snapshot
+                    snapshot = snapshots[affected_id]
 
                     if affected_id == order_id:
                         updated_record = RecordResponse.model_validate({
@@ -524,19 +554,72 @@ class DistributedRecordService:
                     expected_versions
                 )
 
+                # This journal transition commits atomically with all PG
+                # data and metadata version changes.
+                await self.transaction_journal.mark_database_committed(
+                    self.postgresql_repository.session,
+                    operation_id,
+                )
+
         except Exception as exc:
+            if not journal_created:
+                # No Mongo write can occur before the durable journal exists.
+                raise
+
+            try:
+                durable_status = (
+                    await self.transaction_journal.get_operation_status(
+                        operation_id
+                    )
+                )
+            except Exception as status_error:
+                # The commit outcome is unknown. Never compensate blindly.
+                raise RuntimeError(
+                    f"Distributed update '{operation_id}' failed and its "
+                    "durable journal status cannot be read. MongoDB was "
+                    "not compensated because PostgreSQL commit status is "
+                    "unknown; startup recovery is required."
+                ) from status_error
+
+            if durable_status == "DATABASE_COMMITTED":
+                # PostgreSQL committed the update. Recovery only needs to
+                # finalize the journal; restoring MongoDB would be unsafe.
+                raise RuntimeError(
+                    f"Distributed update '{operation_id}' was committed "
+                    "in PostgreSQL, but final confirmation failed. "
+                    "MongoDB was not compensated; recovery will finalize "
+                    "the operation."
+                ) from exc
+
+            if durable_status != "PENDING":
+                raise RuntimeError(
+                    f"Distributed update '{operation_id}' failed with "
+                    f"unexpected journal status '{durable_status}'. "
+                    "Automatic compensation was skipped."
+                ) from exc
+
+            try:
+                await self.transaction_journal.transition(
+                    operation_id,
+                    "COMPENSATING",
+                    error=str(exc),
+                )
+            except Exception as journal_error:
+                raise RuntimeError(
+                    f"Distributed update '{operation_id}' failed and "
+                    "could not enter COMPENSATING. Startup recovery "
+                    "is required."
+                ) from journal_error
+
             compensation_errors = []
 
             for modified_id in reversed(modified_mongo_ids):
                 snapshot = snapshots[modified_id]
-                expected_current_version = (
-                    snapshot["_version"] + 1
-                )
 
                 try:
                     await self.mongodb_repository.restore_document_with_version(
                         snapshot=snapshot,
-                        expected_current_version=expected_current_version,
+                        expected_current_version=snapshot["_version"] + 1,
                     )
                 except Exception as compensation_error:
                     compensation_errors.append(
@@ -544,13 +627,30 @@ class DistributedRecordService:
                     )
 
             if compensation_errors:
+                # Keep COMPENSATING so startup recovery can retry safely.
                 raise RuntimeError(
-                    "Distributed update failed and MongoDB compensation "
-                    "was incomplete. Manual reconciliation is required. "
+                    f"Distributed update '{operation_id}' failed and "
+                    "MongoDB compensation was incomplete. The journal "
+                    "remains COMPENSATING for recovery. "
                     + "; ".join(compensation_errors)
                 ) from exc
 
+            await self.transaction_journal.transition(
+                operation_id,
+                "COMPENSATED",
+                error=str(exc),
+            )
             raise
+
+        # PostgreSQL and all metadata versions have committed. If this
+        # independent journal update fails, startup recovery can finalize it.
+        try:
+            await self.transaction_journal.transition(
+                operation_id,
+                "COMMITTED",
+            )
+        except Exception:
+            pass
 
         return RecordResponse.model_validate({
             **record.model_dump(exclude={"expected_version"}),
@@ -711,8 +811,11 @@ class DistributedRecordService:
         ):
             raise ValueError("Expected version must be a positive integer.")
 
+        operation_id = str(uuid4())
+        journal_created = False
         mongo_snapshot = None
         mongo_deleted = False
+        storage_location = None
 
         try:
             async with self.postgresql_repository.session.begin():
@@ -734,16 +837,16 @@ class DistributedRecordService:
 
                 storage_location = location.storage_location
 
-                if storage_location not in (
+                if storage_location not in {
                     "POSTGRESQL",
                     "MONGODB",
                     "BOTH",
-                ):
+                }:
                     raise ValueError(
                         f"Unsupported storage location: {storage_location}"
                     )
 
-                if storage_location in ("MONGODB", "BOTH"):
+                if storage_location in {"MONGODB", "BOTH"}:
                     mongo_snapshot = (
                         await self.mongodb_repository.get_by_order_id(
                             order_id
@@ -764,13 +867,31 @@ class DistributedRecordService:
                             f"actual={mongo_version}."
                         )
 
+                # Persist the complete snapshot before deleting anything.
+                recovery_payload = {
+                    "operation_id": operation_id,
+                    "order_id": order_id,
+                    "storage_location": storage_location,
+                    "original_version": expected_version,
+                    "mongo_snapshot": mongo_snapshot,
+                }
+
+                await self.transaction_journal.create_operation(
+                    operation_id=operation_id,
+                    operation_type="DELETE",
+                    order_id=order_id,
+                    payload=json_util.dumps(recovery_payload),
+                )
+                journal_created = True
+
+                if storage_location in {"MONGODB", "BOTH"}:
                     await self.mongodb_repository.delete_with_version(
                         order_id=order_id,
                         expected_version=expected_version,
                     )
                     mongo_deleted = True
 
-                if storage_location in ("POSTGRESQL", "BOTH"):
+                if storage_location in {"POSTGRESQL", "BOTH"}:
                     await self.postgresql_repository.delete(
                         order_id=order_id,
                         expected_version=expected_version,
@@ -781,9 +902,55 @@ class DistributedRecordService:
                         expected_version=expected_version,
                     )
 
-            return True
+                # Journal status and PostgreSQL deletion commit atomically.
+                await self.transaction_journal.mark_database_committed(
+                    self.postgresql_repository.session,
+                    operation_id,
+                )
 
         except Exception as exc:
+            if not journal_created:
+                raise
+
+            try:
+                durable_status = (
+                    await self.transaction_journal.get_operation_status(
+                        operation_id
+                    )
+                )
+            except Exception as status_error:
+                raise RuntimeError(
+                    f"DELETE '{operation_id}' failed and its journal "
+                    "status cannot be read. MongoDB was not compensated "
+                    "because the PostgreSQL commit outcome is unknown."
+                ) from status_error
+
+            if durable_status == "DATABASE_COMMITTED":
+                raise RuntimeError(
+                    f"DELETE '{operation_id}' was committed in PostgreSQL, "
+                    "but final journal confirmation failed. Recovery "
+                    "will finalize the operation."
+                ) from exc
+
+            if durable_status != "PENDING":
+                raise RuntimeError(
+                    f"DELETE '{operation_id}' failed with unexpected "
+                    f"journal status '{durable_status}'. Compensation "
+                    "was skipped."
+                ) from exc
+
+            try:
+                await self.transaction_journal.transition(
+                    operation_id,
+                    "COMPENSATING",
+                    error=str(exc),
+                )
+            except Exception as journal_error:
+                raise RuntimeError(
+                    f"DELETE '{operation_id}' failed and could not enter "
+                    "COMPENSATING. Startup recovery is required."
+                ) from journal_error
+
             if mongo_deleted and mongo_snapshot is not None:
                 try:
                     await self.mongodb_repository.restore_deleted_document(
@@ -791,9 +958,25 @@ class DistributedRecordService:
                     )
                 except Exception as compensation_error:
                     raise RuntimeError(
-                        f"Deletion of '{order_id}' failed and MongoDB "
-                        "compensation also failed. Manual reconciliation "
-                        "is required."
+                        f"DELETE '{operation_id}' failed and MongoDB "
+                        "compensation also failed. The journal remains "
+                        "COMPENSATING for recovery."
                     ) from compensation_error
 
+            await self.transaction_journal.transition(
+                operation_id,
+                "COMPENSATED",
+                error=str(exc),
+            )
             raise
+
+        try:
+            await self.transaction_journal.transition(
+                operation_id,
+                "COMMITTED",
+            )
+        except Exception:
+            # DATABASE_COMMITTED is durable and startup recovery can finish.
+            pass
+
+        return True

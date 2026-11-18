@@ -157,12 +157,14 @@ class TransactionJournalRepository:
     async def claim_recovery_batch(
         self,
         limit: int = 10,
-    ) -> AsyncIterator[list[TransactionJournalDB]]:
+    ) -> AsyncIterator[
+        tuple[AsyncSession, list[TransactionJournalDB]]
+    ]:
         """
         Lock a batch of unfinished operations for one recovery worker.
 
-        Row locks remain held until the caller finishes processing the
-        batch and the transaction commits.
+        The caller receives the same session that owns the row locks.
+        Recovery changes must use this session to avoid self-deadlocks.
         """
         if limit < 1:
             raise ValueError("Recovery batch limit must be positive.")
@@ -194,4 +196,4 @@ class TransactionJournalRepository:
                 for operation in operations:
                     operation.attempts += 1
 
-                yield operations
+                yield session, operations

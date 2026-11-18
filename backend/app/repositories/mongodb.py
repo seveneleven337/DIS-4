@@ -455,6 +455,39 @@ class MongoDBRepository:
 
         return document
 
+    async def clear_creation_marker(
+        self,
+        order_id: str,
+        operation_id: str,
+    ) -> bool:
+        if not operation_id:
+            return False
+
+        result = await self.collection.update_one(
+            {
+                "_id": order_id,
+                "_operation_id": operation_id,
+            },
+            {
+                "$unset": {
+                    "_operation_id": "",
+                }
+            },
+        )
+
+        if result.matched_count == 1:
+            return True
+
+        document = await self.collection.find_one(
+            {"_id": order_id},
+            {"_operation_id": 1},
+        )
+
+        if document is None:
+            return False
+
+        return "_operation_id" not in document
+
     async def delete_created(
         self,
         order_id: str,

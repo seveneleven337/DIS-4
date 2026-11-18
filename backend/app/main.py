@@ -20,6 +20,7 @@ from app.adapters.postgresql.database import (
 from app.adapters.postgresql.schema import create_database_schema
 from app.api.routes.records import router as records_router
 from app.loaders.postgresql_seed import seed_postgresql
+from app.services.recovery import DistributedRecoveryService
 
 
 @asynccontextmanager
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
         # Initialize database schemas.
         await create_database_schema()
         await create_mongodb_schema()
+        await DistributedRecoveryService().recover_pending_operations()
 
         # Insert initial data without overwriting existing records.
         await seed_postgresql()

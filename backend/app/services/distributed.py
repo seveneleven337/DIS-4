@@ -247,14 +247,29 @@ class DistributedRecordService:
             )
             raise
 
-        # PostgreSQL has committed. A failure in this final transition
-        # must not trigger compensation of an already committed operation.
+        # PostgreSQL has committed. Never compensate after this point.
+        # Clear the MongoDB creation marker before finalizing the journal.
         try:
+            if storage_location in {"MONGODB", "BOTH"}:
+                marker_cleared = (
+                    await self.mongodb_repository.clear_creation_marker(
+                        order_id,
+                        operation_id,
+                    )
+                )
+
+                if not marker_cleared:
+                    raise RuntimeError(
+                        f"Could not clear the MongoDB creation marker "
+                        f"for {order_id}."
+                    )
+
             await self.transaction_journal.transition(
                 operation_id,
                 "COMMITTED",
             )
         except Exception:
+            # Leave DATABASE_COMMITTED for startup recovery.
             pass
 
         return response

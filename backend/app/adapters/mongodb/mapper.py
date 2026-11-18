@@ -124,6 +124,7 @@ def from_mongodb_document(
         if key not in {
             "_id",
             "_version",
+            "_operation_id",
             "customer",
             "store",
             "sales_representative",

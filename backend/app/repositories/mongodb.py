@@ -431,13 +431,20 @@ class MongoDBRepository:
 
         return [document["_id"] for document in documents]
 
-    async def create(self, record: RecordResponse) -> dict:
+    async def create(
+        self,
+        record: RecordResponse,
+        operation_id: str | None = None,
+    ) -> dict:
         if record.storage_location not in {"MONGODB", "BOTH"}:
             raise ValueError(
                 "Record storage location must be MONGODB or BOTH"
             )
 
         document = to_mongodb_document(record)
+
+        if operation_id is not None:
+            document["_operation_id"] = operation_id
 
         try:
             await self.collection.insert_one(document)
@@ -448,9 +455,19 @@ class MongoDBRepository:
 
         return document
 
-    async def delete_created(self, order_id: str) -> bool:
+    async def delete_created(
+        self,
+        order_id: str,
+        operation_id: str | None = None,
+    ) -> bool:
+        if not operation_id:
+            return False
+
         result = await self.collection.delete_one(
-            {"_id": order_id}
+            {
+                "_id": order_id,
+                "_operation_id": operation_id,
+            }
         )
 
         return result.deleted_count == 1

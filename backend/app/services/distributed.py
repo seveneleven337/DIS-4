@@ -1,4 +1,6 @@
+import json
 from typing import Literal
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +10,7 @@ from app.adapters.mongodb.mapper import (
 )
 from app.repositories.mongodb import MongoDBRepository
 from app.repositories.postgresql import PostgreSQLRepository
+from app.repositories.transaction_journal import TransactionJournalRepository
 from app.schemas.filters import RecordFilters
 from app.schemas.record import (
     RecordCreate,
@@ -23,6 +26,7 @@ class DistributedRecordService:
     def __init__(self, session: AsyncSession, mongodb_database):
         self.postgresql_repository = PostgreSQLRepository(session)
         self.mongodb_repository = MongoDBRepository(mongodb_database)
+        self.transaction_journal = TransactionJournalRepository()
 
     @staticmethod
     def _validate_immutable_ids(
@@ -130,15 +134,36 @@ class DistributedRecordService:
 
         order_id = response.order.order_id
         storage_location = response.storage_location
+        operation_id = str(uuid4())
+
+        initial_payload = json.dumps({
+            "storage_location": storage_location,
+            "operation_id": operation_id,
+        })
+
+        await self.transaction_journal.create_operation(
+            operation_id=operation_id,
+            operation_type="CREATE",
+            order_id=order_id,
+            payload=initial_payload,
+        )
+
         mongo_created = False
 
         try:
             if storage_location == "POSTGRESQL":
                 async with self.postgresql_repository.session.begin():
                     await self.postgresql_repository.create(response)
+                    await self.transaction_journal.mark_database_committed(
+                        self.postgresql_repository.session,
+                        operation_id,
+                    )
 
             elif storage_location == "MONGODB":
-                await self.mongodb_repository.create(response)
+                await self.mongodb_repository.create(
+                    response,
+                    operation_id=operation_id,
+                )
                 mongo_created = True
 
                 async with self.postgresql_repository.session.begin():
@@ -147,13 +172,25 @@ class DistributedRecordService:
                         storage_location="MONGODB",
                         version=1,
                     )
+                    await self.transaction_journal.mark_database_committed(
+                        self.postgresql_repository.session,
+                        operation_id,
+                    )
 
             elif storage_location == "BOTH":
                 async with self.postgresql_repository.session.begin():
                     await self.postgresql_repository.create(response)
 
-                    await self.mongodb_repository.create(response)
+                    await self.mongodb_repository.create(
+                        response,
+                        operation_id=operation_id,
+                    )
                     mongo_created = True
+
+                    await self.transaction_journal.mark_database_committed(
+                        self.postgresql_repository.session,
+                        operation_id,
+                    )
 
             else:
                 raise ValueError(
@@ -161,14 +198,30 @@ class DistributedRecordService:
                 )
 
         except Exception as exc:
+            try:
+                await self.transaction_journal.transition(
+                    operation_id,
+                    "COMPENSATING",
+                    error=str(exc),
+                )
+            except Exception as journal_error:
+                raise RuntimeError(
+                    f"Creation of {order_id} failed and its journal "
+                    "could not enter COMPENSATING. Recovery is required."
+                ) from journal_error
+
             if mongo_created:
                 try:
-                    compensated = (
-                        await self.mongodb_repository.delete_created(
-                            order_id
-                        )
+                    compensated = await self.mongodb_repository.delete_created(
+                        order_id,
+                        operation_id,
                     )
                 except Exception as compensation_error:
+                    await self.transaction_journal.transition(
+                        operation_id,
+                        "FAILED",
+                        error=str(compensation_error),
+                    )
                     raise RuntimeError(
                         f"Creation of {order_id} failed and MongoDB "
                         "compensation also failed. Manual reconciliation "
@@ -176,13 +229,33 @@ class DistributedRecordService:
                     ) from compensation_error
 
                 if not compensated:
+                    await self.transaction_journal.transition(
+                        operation_id,
+                        "FAILED",
+                        error="MongoDB creation compensation failed.",
+                    )
                     raise RuntimeError(
                         f"Creation of {order_id} failed and its MongoDB "
                         "document could not be compensated. "
                         "Manual reconciliation is required."
                     ) from exc
 
+            await self.transaction_journal.transition(
+                operation_id,
+                "COMPENSATED",
+                error=str(exc),
+            )
             raise
+
+        # PostgreSQL has committed. A failure in this final transition
+        # must not trigger compensation of an already committed operation.
+        try:
+            await self.transaction_journal.transition(
+                operation_id,
+                "COMMITTED",
+            )
+        except Exception:
+            pass
 
         return response
 

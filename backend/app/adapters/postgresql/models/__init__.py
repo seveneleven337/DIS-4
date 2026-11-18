@@ -10,6 +10,9 @@ from app.adapters.postgresql.models.sales_representative import (
 )
 from app.adapters.postgresql.models.store import StoreDB
 from app.adapters.postgresql.models.transaction import TransactionDB
+from app.adapters.postgresql.models.transaction_journal import (
+    TransactionJournalDB,
+)
 
 
 __all__ = [
@@ -23,4 +26,5 @@ __all__ = [
     "SalesRepresentativeDB",
     "StoreDB",
     "TransactionDB",
+    "TransactionJournalDB",
 ]

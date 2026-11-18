@@ -708,3 +708,35 @@ class PostgreSQLRepository:
         result = await self.session.scalars(statement)
 
         return list(result.all())
+
+    async def lock_storage_location(
+        self,
+        order_id: str,
+    ) -> RecordLocationDB | None:
+        statement = (
+            select(RecordLocationDB)
+            .where(RecordLocationDB.order_id == order_id)
+            .with_for_update()
+        )
+
+        return await self.session.scalar(statement)
+
+    async def delete_storage_location(
+        self,
+        order_id: str,
+        expected_version: int,
+    ) -> bool:
+        result = await self.session.execute(
+            delete(RecordLocationDB).where(
+                RecordLocationDB.order_id == order_id,
+                RecordLocationDB.storage_location == "MONGODB",
+                RecordLocationDB.version == expected_version,
+            )
+        )
+
+        if result.rowcount != 1:
+            raise ValueError(
+                f"Could not delete metadata for order '{order_id}'."
+            )
+
+        return True

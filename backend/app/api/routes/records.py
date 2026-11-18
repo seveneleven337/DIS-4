@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.mongodb.database import database
@@ -169,3 +169,31 @@ async def get_record_by_order_id(
         )
 
     return record
+
+
+@router.delete(
+    "/{order_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_record(
+    order_id: str,
+    expected_version: Annotated[int, Query(gt=0)],
+    session: AsyncSession = Depends(get_postgresql_session),
+):
+    service = DistributedRecordService(
+        session=session,
+        mongodb_database=database,
+    )
+
+    try:
+        await service.delete(
+            order_id=order_id,
+            expected_version=expected_version,
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc

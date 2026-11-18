@@ -610,3 +610,102 @@ class DistributedRecordService:
             records.append(record)
 
         return records
+
+    async def delete(
+        self,
+        order_id: str,
+        expected_version: int,
+    ) -> bool:
+        if (
+            not isinstance(expected_version, int)
+            or isinstance(expected_version, bool)
+            or expected_version < 1
+        ):
+            raise ValueError("Expected version must be a positive integer.")
+
+        mongo_snapshot = None
+        mongo_deleted = False
+
+        try:
+            async with self.postgresql_repository.session.begin():
+                location = (
+                    await self.postgresql_repository.lock_storage_location(
+                        order_id
+                    )
+                )
+
+                if location is None:
+                    raise ValueError(
+                        f"Order '{order_id}' does not exist."
+                    )
+
+                if location.version != expected_version:
+                    raise ValueError(
+                        "Version conflict: the record has been modified."
+                    )
+
+                storage_location = location.storage_location
+
+                if storage_location not in (
+                    "POSTGRESQL",
+                    "MONGODB",
+                    "BOTH",
+                ):
+                    raise ValueError(
+                        f"Unsupported storage location: {storage_location}"
+                    )
+
+                if storage_location in ("MONGODB", "BOTH"):
+                    mongo_snapshot = (
+                        await self.mongodb_repository.get_by_order_id(
+                            order_id
+                        )
+                    )
+
+                    if mongo_snapshot is None:
+                        raise ValueError(
+                            f"MongoDB document '{order_id}' does not exist."
+                        )
+
+                    mongo_version = mongo_snapshot.get("_version")
+
+                    if mongo_version != expected_version:
+                        raise ValueError(
+                            f"MongoDB version mismatch for '{order_id}': "
+                            f"expected={expected_version}, "
+                            f"actual={mongo_version}."
+                        )
+
+                    await self.mongodb_repository.delete_with_version(
+                        order_id=order_id,
+                        expected_version=expected_version,
+                    )
+                    mongo_deleted = True
+
+                if storage_location in ("POSTGRESQL", "BOTH"):
+                    await self.postgresql_repository.delete(
+                        order_id=order_id,
+                        expected_version=expected_version,
+                    )
+                else:
+                    await self.postgresql_repository.delete_storage_location(
+                        order_id=order_id,
+                        expected_version=expected_version,
+                    )
+
+            return True
+
+        except Exception as exc:
+            if mongo_deleted and mongo_snapshot is not None:
+                try:
+                    await self.mongodb_repository.restore_deleted_document(
+                        mongo_snapshot
+                    )
+                except Exception as compensation_error:
+                    raise RuntimeError(
+                        f"Deletion of '{order_id}' failed and MongoDB "
+                        "compensation also failed. Manual reconciliation "
+                        "is required."
+                    ) from compensation_error
+
+            raise

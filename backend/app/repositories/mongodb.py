@@ -512,3 +512,56 @@ class MongoDBRepository:
             raise ValueError(f"Record {order_id} does not exist")
 
         return True
+
+    async def delete_with_version(
+        self,
+        order_id: str,
+        expected_version: int,
+    ) -> bool:
+        result = await self.collection.delete_one(
+            {
+                "_id": order_id,
+                "_version": expected_version,
+            }
+        )
+
+        if result.deleted_count != 1:
+            current = await self.collection.find_one(
+                {"_id": order_id},
+                projection={"_version": 1},
+            )
+
+            if current is None:
+                raise ValueError(
+                    f"MongoDB document '{order_id}' does not exist."
+                )
+
+            raise ValueError(
+                f"MongoDB version conflict for order '{order_id}': "
+                f"expected={expected_version}, "
+                f"actual={current.get('_version')}."
+            )
+
+        return True
+
+    async def restore_deleted_document(
+        self,
+        snapshot: dict,
+    ) -> bool:
+        order_id = snapshot.get("_id")
+        version = snapshot.get("_version")
+
+        if not isinstance(order_id, str):
+            raise ValueError("MongoDB snapshot has an invalid order ID.")
+
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
+            raise ValueError(
+                f"MongoDB snapshot '{order_id}' has an invalid version."
+            )
+
+        await self.collection.insert_one(dict(snapshot))
+        return True
